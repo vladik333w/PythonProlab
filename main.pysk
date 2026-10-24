@@ -1,0 +1,241 @@
+import sys
+import uuid
+import firebase_admin
+from firebase_admin import credentials, db
+
+class Game:
+    def __init__(self, title: str, year: int, developer: str):
+        self.title = title
+        self.year = year
+        self.developer = developer
+
+    def to_dict(self) -> dict:
+        return {"title": self.title, "year": self.year, "developer": self.developer}
+
+    @staticmethod
+    def from_dict(data: dict):
+        return Game(data["title"], data["year"], data["developer"])
+
+class PlayerGame:
+    def __init__(self, title: str, hours_played: float, achievements: list):
+        self.title = title
+        self.hours_played = hours_played
+        self.achievements = achievements if achievements else []
+
+    def to_dict(self) -> dict:
+        return {"title": self.title, "hours_played": self.hours_played, "achievements": self.achievements}
+
+    @staticmethod
+    def from_dict(data: dict):
+        return PlayerGame(data["title"], data["hours_played"], data.get("achievements", []))
+
+class Player:
+    def __init__(self, player_id: str, name: str, level: int = 1, games: dict = None):
+        self.id = player_id
+        self.name = name
+        self.level = level
+        self.games = games if games else {}
+
+    @property
+    def games_count(self) -> int:
+        return len(self.games)
+
+    @property
+    def total_hours(self) -> float:
+        return sum(g.hours_played for g in self.games.values())
+
+    @property
+    def total_achievements(self) -> int:
+        return sum(len(g.achievements) for g in self.games.values())
+
+    def update_level(self):
+        self.level = 1 + (self.total_achievements // 5)
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "level": self.level,
+            "games": {title: g.to_dict() for title, g in self.games.items()}
+        }
+
+    @staticmethod
+    def from_dict(player_id: str, data: dict):
+        games_data = data.get("games", {})
+        games = {title: PlayerGame.from_dict(g) for title, g in games_data.items()}
+        return Player(player_id, data["name"], data.get("level", 1), games)
+
+class FirebaseRepository:
+    def __init__(self, database_url: str, credential_path: str = "serviceAccountKey.json"):
+        try:
+            cred = credentials.Certificate(credential_path)
+            firebase_admin.initialize_app(cred, {'databaseURL': database_url})
+        except ValueError:
+            pass
+        self.db_ref = db.reference("/")
+
+    def save_game(self, game: Game):
+        self.db_ref.child("catalog").child(game.title).set(game.to_dict())
+
+    def load_catalog(self) -> dict:
+        data = self.db_ref.child("catalog").get()
+        return {title: Game.from_dict(g) for title, g in data.items()} if data else {}
+
+    def save_player(self, player: Player):
+        self.db_ref.child("players").child(player.id).set(player.to_dict())
+
+    def load_players(self) -> dict:
+        data = self.db_ref.child("players").get()
+        return {p_id: Player.from_dict(p_id, p) for p_id, p in data.items()} if data else {}
+
+class SteamManager:
+    def __init__(self, repo: FirebaseRepository):
+        self.repo = repo
+        self.catalog = {}
+        self.players = {}
+        self.sync_from_db()
+
+    def sync_from_db(self):
+        self.catalog = self.repo.load_catalog()
+        self.players = self.repo.load_players()
+
+    def add_game_to_catalog(self, title: str, year: int, developer: str) -> bool:
+        if title in self.catalog:
+            return False
+        game = Game(title, year, developer)
+        self.catalog[title] = game
+        self.repo.save_game(game)
+        return True
+
+    def create_player_profile(self, name: str) -> str:
+        player_id = str(uuid.uuid4())[:8]
+        player = Player(player_id, name)
+        self.players[player_id] = player
+        self.repo.save_player(player)
+        return player_id
+
+    def update_player_name(self, player_id: str, new_name: str) -> bool:
+        if player_id not in self.players:
+            return False
+        self.players[player_id].name = new_name
+        self.repo.save_player(self.players[player_id])
+        return True
+
+    def add_game_to_player(self, player_id: str, game_title: str, hours: float, achievements: list) -> bool:
+        if player_id not in self.players or game_title not in self.catalog:
+            return False
+        player = self.players[player_id]
+        if game_title in player.games:
+            return False
+        player.games[game_title] = PlayerGame(game_title, hours, achievements)
+        player.update_level()
+        self.repo.save_player(player)
+        return True
+
+    def remove_game_from_player(self, player_id: str, game_title: str) -> bool:
+        if player_id not in self.players:
+            return False
+        player = self.players[player_id]
+        if game_title not in player.games:
+            return False
+        del player.games[game_title]
+        player.update_level()
+        self.repo.save_player(player)
+        return True
+
+    def search_games_by_title(self, query: str) -> list:
+        return [g for g in self.catalog.values() if query.lower() in g.title.lower()]
+
+class ConsoleInterface:
+    def __init__(self, manager: SteamManager):
+        self.manager = manager
+        self.current_player_id = None
+
+    def run(self):
+        while True:
+            self.manager.sync_from_db()
+            print("\n" + "="*50)
+            status = f"[Активний профіль: {self.manager.players[self.current_player_id].name}]" if self.current_player_id else "[Профіль не обрано]"
+            print(f" СИСТЕМА ПРОФІЛІВ STEAM {status}\n" + "="*50)
+            print("1. Переглянути каталог ігор")
+            print("2. Додати нову гру до каталогу")
+            print("3. Створити профіль гравця")
+            print("4. Переглянути / Обрати профіль гравця")
+            print("5. Додати гру до своєї бібліотеки")
+            print("6. Переглянути свою бібліотеку ігор")
+            print("7. Переглянути статистику профілю")
+            print("8. Змінити ім'я профілю")
+            print("9. Видалити гру з бібліотеки")
+            print("10. Пошук гри за назвою")
+            print("0. Вийти з програми\n" + "="*50)
+            
+            choice = input("Оберіть дію: ").strip()
+            if choice == "1": self.show_catalog()
+            elif choice == "2": self.add_game_to_catalog()
+            elif choice == "3": self.create_profile()
+            elif choice == "4": self.show_and_select_profiles()
+            elif choice == "5": self.add_game_to_library()
+            elif choice == "6": self.show_library()
+            elif choice == "7": self.show_statistics()
+            elif choice == "8": self.change_profile_name()
+            elif choice == "9": self.remove_game_from_library()
+            elif choice == "10": self.search_game()
+            elif choice == "0": sys.exit(0)
+            else: print("Помилка: Некоректний вибір.")
+
+    def show_catalog(self):
+        print("\n--- ЗАГАЛЬНИЙ КАТАЛОГ ІГОР ---")
+        if not self.manager.catalog: print("Каталог порожній."); return
+        for i, game in enumerate(self.manager.catalog.values(), 1):
+            print(f"{i}. \"{game.title}\" | Рік: {game.year} | Розробник: {game.developer}")
+
+    def add_game_to_catalog(self):
+        print("\n--- ДОДАННЯ ГРИ ДО КАТАЛОГУ ---")
+        title = input("Введіть назву гри: ").strip()
+        if not title: print("Помилка: Назва порожня."); return
+        try:
+            year = int(input("Введіть рік випуску (1950-2030): "))
+            if year < 1950 or year > 2030: print("Помилка: Некоректний рік."); return
+        except ValueError: print("Помилка: Некоректне число."); return
+        developer = input("Введіть студію-розробника: ").strip()
+        if not developer: print("Помилка: Поле розробника порожнє."); return
+        if self.manager.add_game_to_catalog(title, year, developer):
+            print(f"Успіх: Гру \"{title}\" додано.")
+        else: print("Помилка: Гра вже існує.")
+
+    def create_profile(self):
+        print("\n--- СТВОРЕННЯ ПРОФІЛЮ ГРАВЦЯ ---")
+        name = input("Введіть ім'я гравця: ").strip()
+        if not name: print("Помилка: Ім'я порожнє."); return
+        self.current_player_id = self.manager.create_player_profile(name)
+        print(f"Успіх: Профіль \"{name}\" створено.")
+
+    def show_and_select_profiles(self):
+        print("\n--- ЗАРЕЄСТРОВАНІ ПРОФІЛІ ---")
+        if not self.manager.players: print("Профілів немає."); return
+        p_list = list(self.manager.players.values())
+        for i, player in enumerate(p_list, 1):
+            marker = " [ПОТОЧНИЙ]" if player.id == self.current_player_id else ""
+            print(f"{i}. {player.name} (Рівень: {player.level}, Ігор: {player.games_count}){marker}")
+        choose = input("\nВведіть номер профілю для активації (або '0'): ").strip()
+        if choose != '0':
+            try:
+                idx = int(choose) - 1
+                if 0 <= idx < len(p_list):
+                    self.current_player_id = p_list[idx].id
+                    print(f"Активний профіль: {p_list[idx].name}")
+                else: print("Помилка: Неправильний номер.")
+            except ValueError: print("Помилка введення.")
+
+    def add_game_to_library(self):
+        if not self.current_player_id: print("Помилка: Оберіть профіль."); return
+        print("\n--- ДОДАННЯ ГРИ ДО БІБЛІОТЕКИ ---")
+        if not self.manager.catalog: print("Каталог порожній."); return
+        games_list = list(self.manager.catalog.keys())
+        for i, title in enumerate(games_list, 1): print(f"{i}. {title}")
+        try:
+            g_choice = int(input("Оберіть номер гри: ")) - 1
+            if not (0 <= g_choice < len(games_list)): print("Помилка: Неправильний вибір."); return
+            game_title = games_list[g_choice]
+            hours = float(input("Введіть кількість награних годин: "))
+            if hours < 0: print("Помилка: Від'ємне значення."); return
+        except ValueError: print("Помилка введення."); return
