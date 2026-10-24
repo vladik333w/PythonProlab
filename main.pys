@@ -1,0 +1,146 @@
+import json
+from pathlib import Path
+
+DATA_FILE=Path(__file__).with_name("books.json")
+
+class LibraryError(Exception):
+    """Помилка роботи з бібліотекою"""
+
+class BookNotFoundError(LibraryError):
+    """Книгу не знайдено"""
+
+class Book:
+    def __init__(self, book_id: int, book_title: str, book_authors: str, available: bool=True):
+        self.id = book_id
+        self.title = book_title
+        self.authors = book_authors
+        self.available = available
+
+    def to_dict(self)->dict:
+        return {
+            "book_id": self.id,
+            "book_title": self.title,
+            "book_authors": self.authors,
+            "available": self.available
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        if (not isinstance(data, dict) or type(data.get("book_id")) is not int or type(data.get("book_title"))
+                is not str or type(data.get("book_authors")) is not str or type(data.get("available")) is not bool):
+            raise ValueError('Некоректний запис книги у файлі')
+        return cls(data["book_id"], data["book_title"], data["book_authors"], data["available"])
+
+class Library:
+    def __init__(self, filename:Path=DATA_FILE):
+        self.filename = Path(filename)
+        self.books:list[Book] = []
+        self.load()
+
+    def load(self):
+        if not self.filename.exists():
+            self.books=[]
+            return
+        try:
+            with self.filename.open(mode='r', encoding='utf-8') as file:
+                data = json.load(file)
+            if not isinstance(data, list):
+                raise ValueError("Файл повинен містити список книг")
+            books=[Book.from_dict(item) for item in data]
+            ids = [book.id for book in books]
+            if len(ids) != len(set(ids)):
+                raise ValueError('У файлы повторюються Id')
+            self.books=books
+        except (OSError, json.decoder.JSONDecodeError, ValueError) as e:
+            raise LibraryError(f"Не вдалося прочитати файл помилка: {e}")
+
+    def save(self):
+        try:
+            with self.filename.open(mode='w', encoding='utf-8') as file:
+                json.dump([book.to_dict() for book in self.books],file, ensure_ascii=False, indent=2)
+        except OSError as e:
+            raise LibraryError(f"Не вдалося зберегти у базу, помилка:{e}")
+
+    def add(self,title:str, authors:str):
+        if not title.strip() or not authors.strip():
+            raise ValueError("Назва та автор не можуть бути порожніми")
+        new_id = max((book.id for book in self.books),default=0)+1
+        book = Book(new_id, title.strip(), authors.strip())
+        self.books.append(book)
+        self.save()
+        return book
+
+    def get(self,book_id:int):
+        for book in self.books:
+            if book.id == book_id:
+                return book
+        raise BookNotFoundError(f"Книги з {book_id} не знайдено")
+
+    def search(self,text:str):
+        text = text.casefold()
+        return [book for book in self.books if text in book.title.casefold() or text in book.authors.casefold()]
+
+    def change_available(self,book_id:int,available:bool):
+        book = self.get(book_id)
+        if book.available==available:
+            raise LibraryError("Книга зайнята")
+        book.available=available
+        self.save()
+
+    def delete(self,book_id:int):
+        book = self.get(book_id)
+        self.books.remove(book)
+        self.save()
+
+def print_books(books):
+    if not books:
+        print("Книг немає")
+        return
+    for book in books:
+        status = "Вільна" if book.available else "Видана"
+        print(f"{book.id}. {book.title} | {book.authors} | {status}")
+
+def read_id():
+    book_id = int(input("ID книги"))
+    if book_id <1:
+        raise ValueError("Id має бути додатнім числом")
+    return book_id
+def main():
+    try:
+        LIBRARY = Library()
+    except LibraryError as e:
+        print(e)
+        return
+
+    while True:
+        print("\n 1. Показати книгу\n 2. Додати книгу\n 3. Знайти книгу\n 4. Видати книгу\n 5. Повернути книгу\n 6. Видалити книгу\n 0. Вийти")
+        try:
+            choice = input("Ваш вибір:").strip()
+            if choice == "0":
+                print("Допобачення!")
+                break
+            elif choice == "1":
+                print_books(LIBRARY.books)
+            elif choice == "2":
+                book = LIBRARY.add(input("Назва"),input("Автор:"))
+                print("Книгу додано")
+            elif choice == "3":
+                print_books(LIBRARY.search(input("Пошук:")))
+            elif choice == "4":
+                LIBRARY.change_available(read_id(), available=False)
+                print("Видано")
+            elif choice == "5":
+                LIBRARY.change_available(read_id(), available=True)
+                print("Повернуто")
+            elif choice == "6":
+                LIBRARY.delete(read_id())
+                print("Видалено")
+            else:
+                print("Невідомий пункт меню")
+
+        except (LibraryError,ValueError) as e:
+            print(f"Помилка {e}")
+        except:
+            print("Програму завершено")
+            break
+main()
